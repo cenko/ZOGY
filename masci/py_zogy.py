@@ -1,8 +1,11 @@
+#!/usr/bin/env python
+
 ############################################################
 # Python implementation of ZOGY image subtraction algorithm
 # See Zackay, Ofek, and Gal-Yam 2016 for details
 # http://arxiv.org/abs/1601.02655
 # SBC - 6 July 2016
+# FJM - 20 October 2016
 ############################################################
 
 import sys
@@ -12,9 +15,8 @@ import astropy.io.fits as fits
 from scipy.fftpack import fft2, ifft2
 
 def py_zogy(newimage, refimage, newpsfimage, refpsfimage, newsigimage,
-            refsigimage, subimage, subpsfimage, subcorrimage, 
-            newgain=1.539, newbkg=303.922, refgain=1.539, 
-            refbkg=309.590, newsigma=52.764, refsigma=2.259, Eps=1.0e-8):
+            refsigimage, subimage, subpsfimage, subcorrimage, newsigma,
+            refsigma, Eps=1.0e-8): 
 
 	'''Python implementation of ZOGY image subtraction algorithm.
 	As per Frank's instructions, will assume images have been aligned,
@@ -80,7 +82,7 @@ def py_zogy(newimage, refimage, newpsfimage, refpsfimage, newsigimage,
 	FPr2 = Frefpsf * np.conjugate(Frefpsf)
 	Den = refsigma**2 * FPn2 + newsigma**2 * FPr2 + Eps
 	SqrtDen = np.sqrt(Den)
-	
+
 	# Subtraction image (and its FT)
 	FD = (FPrFN - FPnFR) / SqrtDen
 	D = ifft2(FD) 
@@ -90,8 +92,8 @@ def py_zogy(newimage, refimage, newpsfimage, refpsfimage, newsigimage,
 	
 	# Write out resulting subtraction image
 	outim = fits.open(newimage)
-	outim[0].data = D.real
-	outim.writeto(subimage, output_verify="warn")
+	outim[0].data = (D.real).astype(np.float32) 
+	outim.writeto(subimage, output_verify="warn", clobber=True)
 	
 	# FT of PSF of subtraction image
 	F_D = 1.0 / np.sqrt(newsigma**2 + refsigma**2)
@@ -102,8 +104,8 @@ def py_zogy(newimage, refimage, newpsfimage, refpsfimage, newsigimage,
 	subpsf = fft.ifftshift(subpsf)
 	subpsf = subpsf[PadImY:-PadImY,PadImX:-PadImX]
 	outpsf = fits.open(newpsfimage)
-	outpsf[0].data = subpsf.real
-	outpsf.writeto(subpsfimage, output_verify="warn")
+	outpsf[0].data = (subpsf.real).astype(np.float32)
+	outpsf.writeto(subpsfimage, output_verify="warn", clobber=True)
 	
 	# Calculate Score image
 	# ***Note this is formally off by a factor of F_r***
@@ -137,17 +139,17 @@ def py_zogy(newimage, refimage, newpsfimage, refpsfimage, newsigimage,
 	#Scorr = fft.ifftshift(Scorr)
 	Scorr = Scorr[:-PadY,:-PadX]
 	scorrim = fits.open(newimage)
-	scorrim[0].data = Scorr.real
-	scorrim.writeto(subcorrimage, output_verify="warn")
+	scorrim[0].data = (Scorr.real).astype(np.float32)
+	scorrim.writeto(subcorrimage, output_verify="warn", clobber=True)
 	
 	return
 	
 if __name__ == "__main__":
 
 	# Usage
-	if len(sys.argv) != 10:
-		print "Usage: python py_zogy.py <newimage> <refimage> <newpsfimage> <refpsfimage> <newsigmaimage> <refsigmaimage> <subimage> <subpsfimage> <subcorrimage>"
+	if len(sys.argv) != 12:
+		print "Usage: python py_zogy.py <newimage> <refimage> <newpsfimage> <refpsfimage> <newsigmaimage> <refsigmaimage> <subimage> <subpsfimage> <subcorrimage> <newsigma_value> <refsigma_value>"
 	else:
-		py_zogy(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5],
-		        sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9])
-
+		py_zogy(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4],
+                        sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8],
+                        sys.argv[9], float(sys.argv[10]), float(sys.argv[11]))

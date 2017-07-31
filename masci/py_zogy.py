@@ -6,150 +6,196 @@
 # http://arxiv.org/abs/1601.02655
 # SBC - 6 July 2016
 # FJM - 20 October 2016
+# SBC - 28 July 2017
 ############################################################
 
 import sys
 import numpy as np
-import numpy.fft as fft
-import astropy.io.fits as fits
-from scipy.fftpack import fft2, ifft2
 
-def py_zogy(newimage, refimage, newpsfimage, refpsfimage, newsigimage,
-            refsigimage, subimage, subpsfimage, subcorrimage, newsigma,
-            refsigma, Eps=1.0e-8): 
+import astropy.io.fits as fits
+
+# Could also use numpy.fft, but this is apparently faster
+import pyfftw
+import pyfftw.interfaces.numpy_fft as fft
+pyfftw.interfaces.cache.enable()
+pyfftw.interfaces.cache.set_keepalive_time(1.)
+
+def py_zogy(Nf, Rf, P_Nf, P_Rf, S_Nf, S_Rf, SN, SR, dx=0.25, dy=0.25):
 
 	'''Python implementation of ZOGY image subtraction algorithm.
 	As per Frank's instructions, will assume images have been aligned,
-	background subtracted, and gain-matched.'''
+	background subtracted, and gain-matched.
+	
+	Arguments:
+	N: New image (filename)
+	R: Reference image (filename)
+	P_N: PSF of New image (filename)
+	P_R: PSF or Reference image (filename)
+	S_N: 2D Uncertainty (sigma) of New image (filename)
+	S_R: 2D Uncertainty (sigma) of Reference image (filename)
+	SN: Average uncertainty (sigma) of New image
+	SR: Average uncertainty (sigma) of Reference image
+	dx: Astrometric uncertainty (sigma) in x coordinate
+	dy: Astrometric uncertainty (sigma) in y coordinate
+	
+	Returns:
+	D: Subtracted image
+	P_D: PSF of subtracted image
+	S_corr: Corrected subtracted image
+	'''
 	
 	# Load the new and ref images into memory
-	newim = fits.open(newimage)[0].data
-	refim = fits.open(refimage)[0].data
-	
-	# Load the variance images into memory
-	newsig = fits.open(newsigimage)[0].data
-	refsig = fits.open(refsigimage)[0].data
-	
-	# Pad the images (if necessary)
-	[ny, nx] = refim.shape
-	if ny % 2 == 0: 
-		PadY = 1
-	else: 
-		PadY = 0
-	if nx % 2 == 0:
-		PadX = 1
-	else:
-		PadX = 0
-	newim = np.pad(newim, [(0, PadY), (0, PadX)], 'constant', 
-	               constant_values=0.0)
-	newsig = np.pad(newsig, [(0, PadY), (0, PadX)], 'constant', 
-	               constant_values=0.0)
-	refim = np.pad(refim, [(0, PadY), (0, PadX)], 'constant', 
-	               constant_values=0.0)
-	refsig = np.pad(refsig, [(0, PadY), (0, PadX)], 'constant', 
-	               constant_values=0.0)
+	N = fits.open(Nf)[0].data
+	R = fits.open(Rf)[0].data
 	
 	# Load the PSFs into memory
-	newpsf = fits.open(newpsfimage)[0].data
-	refpsf = fits.open(refpsfimage)[0].data
+	P_N_small = fits.open(P_Nf)[0].data
+	P_R_small = fits.open(P_Rf)[0].data
 	
-	# Pad the PSFs (if necessary)
-	PadImY = int(0.5 * (newim.shape[0] - (refpsf.shape[0]-1) - 1))
-	PadImX = int(0.5 * (newim.shape[1] - (refpsf.shape[1]-1) - 1))
-	newpsf = np.pad(newpsf, [(PadImY, PadImY), (PadImX, PadImX)],
-	                'constant', constant_values=0.0)
-	refpsf = np.pad(refpsf, [(PadImY, PadImY), (PadImX, PadImX)],
-	                'constant', constant_values=0.0)
-	                
+	# Place PSF at center of image with same size as new / reference
+	P_N = np.zeros(N.shape)
+	P_R = np.zeros(R.shape)
+	idx = [slice(N.shape[0]/2 - P_N_small.shape[0]/2,
+	             N.shape[0]/2 + P_N_small.shape[0]/2 + 1),
+	       slice(N.shape[1]/2 - P_N_small.shape[1]/2,
+	             N.shape[1]/2 + P_N_small.shape[1]/2 + 1)]
+	P_N[idx] = P_N_small
+	P_R[idx] = P_R_small
+		
 	# Shift the PSF to the origin so it will not introduce a shift
-	newpsf = fft.fftshift(newpsf)
-	refpsf = fft.fftshift(refpsf)
+	P_N = fft.fftshift(P_N)
+	P_R = fft.fftshift(P_R)
+		
+	# Take all the Fourier Transforms
+	N_hat = fft.fft2(N)
+	R_hat = fft.fft2(R)
 	
-	# Take Fourier Transform of all arrays
-	Fnewim = fft2(newim.astype(float))
-	Frefim = fft2(refim.astype(float))
-	Fnewpsf = fft2(newpsf.astype(float))
-	Frefpsf = fft2(refpsf.astype(float))
+	P_N_hat = fft.fft2(P_N)
+	P_R_hat = fft.fft2(P_R)
 	
-	# Numerator of FT of difference image (Equation 13)
-	# Need element-by-element multiplication here
-	FPrFN = Frefpsf * Fnewim
-	FPnFR = Fnewpsf * Frefim
+	# Fourier Transform of Difference Image (Equation 13)
+	D_hat_num = (P_R_hat * N_hat - P_N_hat * R_hat) 
+	D_hat_den = np.sqrt(SN**2 * np.abs(P_R_hat**2) + SR**2 * np.abs(P_N_hat**2))
+	D_hat = D_hat_num / D_hat_den
 	
-	# Denominator of FT of difference image (Equation 13)
-	# Need element-by-element multiplication here
-	FPn2 = Fnewpsf * np.conjugate(Fnewpsf)
-	FPr2 = Frefpsf * np.conjugate(Frefpsf)
-	Den = refsigma**2 * FPn2 + newsigma**2 * FPr2 + Eps
-	SqrtDen = np.sqrt(Den)
+	# Flux-based zero point (Equation 15)
+	FD = 1. / np.sqrt(SN**2 + SR**2)
+	
+	# Difference Image
+	# TODO: Why is the FD normalization in there?
+	D = np.real(fft.ifft2(D_hat)) / FD
+	
+	# Fourier Transform of PSF of Subtraction Image (Equation 14)
+	P_D_hat = P_R_hat * P_N_hat / FD / D_hat_den
+	
+	# PSF of Subtraction Image
+	P_D = np.real(fft.ifft2(P_D_hat))
+	P_D = fft.ifftshift(P_D)	
+	P_D = P_D[idx]
+	
+	# Fourier Transform of Score Image (Equation 17)
+	S_hat = FD * D_hat * np.conj(P_D_hat)
+	
+	# Score Image
+	S = np.real(fft.ifft2(S_hat))
+	
+	# Now start calculating Scorr matrix (including all noise terms)
+	
+	# Start out with source noise
+	# Load the sigma images into memory
+	S_N = fits.open(S_Nf)[0].data
+	S_R = fits.open(S_Rf)[0].data
 
-	# Subtraction image (and its FT)
-	FD = (FPrFN - FPnFR) / SqrtDen
-	D = ifft2(FD) 
+	# Sigma to variance
+	V_N = S_N**2
+	V_R = S_R**2
 	
-	# Remove padding
-	D = D[:-PadY,:-PadX]
+	# Fourier Transform of variance images
+	V_N_hat = fft.fft2(V_N)
+	V_R_hat = fft.fft2(V_R)
 	
-	# Write out resulting subtraction image
-	outim = fits.open(newimage)
-	outim[0].data = (D.real).astype(np.float32) 
-	outim.writeto(subimage, output_verify="warn", clobber=True)
+	# Equation 28
+	kr_hat = np.conj(P_R_hat) * np.abs(P_N_hat**2) / (D_hat_den**2)
+	kr = np.real(fft.ifft2(kr_hat))
 	
-	# FT of PSF of subtraction image
-	F_D = 1.0 / np.sqrt(newsigma**2 + refsigma**2)
-	Fsubpsf = Fnewpsf * Frefpsf / SqrtDen / F_D
+	# Equation 29
+	kn_hat = np.conj(P_N_hat) * np.abs(P_R_hat**2) / (D_hat_den**2)
+	kn = np.real(fft.ifft2(kn_hat))
 	
-	# PSF of subtraction image
-	subpsf = ifft2(Fsubpsf)
-	subpsf = fft.ifftshift(subpsf)
-	subpsf = subpsf[PadImY:-PadImY,PadImX:-PadImX]
-	outpsf = fits.open(newpsfimage)
-	outpsf[0].data = (subpsf.real).astype(np.float32)
-	outpsf.writeto(subpsfimage, output_verify="warn", clobber=True)
+	# Noise in New Image: Equation 26
+	V_S_N = np.real(fft.ifft2(V_N_hat * fft.fft2(kn**2)))
 	
-	# Calculate Score image
-	# ***Note this is formally off by a factor of F_r***
-	FS = (np.conjugate(Fnewpsf) * FPr2 * Fnewim - 
-	      np.conjugate(Frefpsf) * FPn2 * Frefim) / Den
-	S = ifft2(FS)
+	# Noise in Reference Image: Equation 27
+	V_S_R = np.real(fft.ifft2(V_R_hat * fft.fft2(kr**2)))
 	
-	# Alternate method to get score image
-	# Use this for now - seem identical (to numerical precision)
-	FS2 = F_D * FD * np.conjugate(Fsubpsf)
-	S2 = ifft2(FS2)
-	
-	# Now for the noise image (Snoise)
-	# First term is the variance in the new image (in e-)
-	Vnew = np.power(newsig,2)
-	FVnew = fft2(Vnew)
-	Fkn = np.conjugate(Fnewpsf) * FPr2 / Den # Off by a factor of Fn
-	FVSn = FVnew * fft2(ifft2(Fkn)**2)
-	
-	# Second is the variance in the ref image
-	Vref = np.power(refsig,2)
-	FVref = fft2(Vref)
-	Fkr = np.conjugate(Frefpsf) * FPn2 / Den # Off by a factor of Fr
-	FVSr = FVref * fft2(ifft2(Fkr)**2)
-	
-	# Calculate Snoise (leaving out astrometric noise, gradient, ...)
-	Snoise = np.sqrt( ifft2(FVSn) + ifft2(FVSr) )
-	
-	# Scorr: calculate and write out
-	Scorr = S2 / Snoise
-	#Scorr = fft.ifftshift(Scorr)
-	Scorr = Scorr[:-PadY,:-PadX]
-	scorrim = fits.open(newimage)
-	scorrim[0].data = (Scorr.real).astype(np.float32)
-	scorrim.writeto(subcorrimage, output_verify="warn", clobber=True)
-	
-	return
+	# Astrometric Noise
+	# Equation 31
+	# TODO: Check axis (0/1) vs x/y coordinates
+	S_N = np.real(fft.ifft2(kn_hat * N_hat))
+	dSNdx = S_N - np.roll(S_N, 1, axis=1)
+	dSNdy = S_N - np.roll(S_N, 1, axis=0)
+   
+   	# Equation 30
+   	V_ast_S_N = dx**2 * dSNdx**2 + dy**2 * dSNdy**2
+
+	# Equation 33
+	S_R = np.real(fft.ifft2(kr_hat * R_hat))
+	dSRdx = S_R - np.roll(S_R, 1, axis=1)
+	dSRdy = S_R - np.roll(S_R, 1, axis=0)
+  
+  	# Equation 32
+  	V_ast_S_R = dx**2 * dSRdx**2 + dy**2 * dSRdy**2
+  	
+  	# Calculate Scorr
+  	S_corr = S / np.sqrt(V_S_N + V_S_R + V_ast_S_N + V_ast_S_R)
+  	
+  	return D, P_D, S_corr
 	
 if __name__ == "__main__":
 
 	# Usage
-	if len(sys.argv) != 12:
-		print "Usage: python py_zogy.py <newimage> <refimage> <newpsfimage> <refpsfimage> <newsigmaimage> <refsigmaimage> <subimage> <subpsfimage> <subcorrimage> <newsigma_value> <refsigma_value>"
+	if len(sys.argv) == 12:
+	
+		D, P_D, S_corr = py_zogy(sys.argv[1], sys.argv[2], sys.argv[3],
+		                         sys.argv[4], sys.argv[5], sys.argv[6],
+		                         float(sys.argv[7]), float(sys.argv[8]))
+		
+		# Difference Image
+		tmp = fits.open(sys.argv[1])
+		tmp[0].data = D.astype(np.float32)
+		tmp.writeto(sys.argv[9], output_verify="warn", overwrite=True)
+	
+		# S_corr image
+		tmp[0].data = S_corr.astype(np.float32)
+		tmp.writeto(sys.argv[11], output_verify="warn", overwrite=True)
+		
+		# PSF Image
+		tmp = fits.open(sys.argv[3])
+		tmp[0].data = P_D.astype(np.float32)
+		tmp.writeto(sys.argv[10], output_verify="warn", overwrite=True)
+		
+	elif len(sys.argv) == 14:
+	
+		D, P_D, S_corr = py_zogy(sys.argv[1], sys.argv[2], sys.argv[3],
+		                         sys.argv[4], sys.argv[5], sys.argv[6],
+		                         float(sys.argv[7]), float(sys.argv[8]), 
+		                         dx=float(sys.argv[9]), dy=float(sys.argv[10]))
+		
+		# Difference Image
+		tmp = fits.open(sys.argv[1])
+		tmp[0].data = D.astype(np.float32)
+		tmp.writeto(sys.argv[11], output_verify="warn", overwrite=True)
+	
+		# S_corr image
+		tmp[0].data = S_corr.astype(np.float32)
+		tmp.writeto(sys.argv[13], output_verify="warn", overwrite=True)
+		
+		# PSF Image
+		tmp = fits.open(sys.argv[3])
+		tmp[0].data = P_D.astype(np.float32)
+		tmp.writeto(sys.argv[12], output_verify="warn", overwrite=True)
+		
 	else:
-		py_zogy(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4],
-                        sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8],
-                        sys.argv[9], float(sys.argv[10]), float(sys.argv[11]))
+	
+		print "Usage: python py_zogy.py <NewImage> <RefImage> <NewPSF> <RefPSF> <NewSigmaImage> <RefSigmaImage> <NewSigmaMode> <RefSigmaMode> <AstUncertX> <AstUncertY> <DiffImage> <DiffPSF> <ScorrImage>" 
+		

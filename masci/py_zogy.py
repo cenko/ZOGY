@@ -9,7 +9,7 @@
 # SBC - 28 July 2017
 ############################################################
 
-import sys
+import sys, time
 import numpy as np
 
 import astropy.io.fits as fits
@@ -153,7 +153,6 @@ def py_zogy(Nf, Rf, P_Nf, P_Rf, S_Nf, S_Rf, SN, SR, dx=0.25, dy=0.25):
 	
 if __name__ == "__main__":
 
-	# Usage
 	if len(sys.argv) == 12:
 	
 		D, P_D, S_corr = py_zogy(sys.argv[1], sys.argv[2], sys.argv[3],
